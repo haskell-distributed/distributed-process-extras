@@ -67,7 +67,7 @@ module Control.Distributed.Process.Extras.SystemLog
   , sendLog
   ) where
 
-import Control.DeepSeq (NFData)
+import Control.DeepSeq (NFData(..))
 import Control.Distributed.Process
 import Control.Distributed.Process.Management
   ( MxEvent(MxConnected, MxDisconnected, MxLog, MxUser)
@@ -127,16 +127,17 @@ data LogLevel =
   deriving (Typeable, Generic, Eq,
             Read, Show, Ord, Enum)
 instance Binary LogLevel where
+instance NFData LogLevel where rnf x = x `seq` ()
 
 data SetLevel = SetLevel !LogLevel
   deriving (Typeable, Generic)
 instance Binary SetLevel where
-instance NFData SetLevel where
+instance NFData SetLevel where rnf x = x `seq` ()
 
 data AddFormatter = AddFormatter !(Closure (Message -> Process (Maybe String)))
   deriving (Typeable, Generic)
 instance Binary AddFormatter where
-instance NFData AddFormatter where
+instance NFData AddFormatter where rnf x = x `seq` ()
 
 data LogState =
   LogState { output      :: !(String -> Process ())
@@ -151,7 +152,7 @@ data LogMessage =
   | LogData    !Message !LogLevel
   deriving (Typeable, Generic, Show)
 instance Binary LogMessage where
-instance NFData LogMessage where
+instance NFData LogMessage where rnf x = x `seq` ()
 
 type LogFormat = String -> Process String
 

@@ -43,7 +43,7 @@ import Control.Concurrent.MVar
   , newMVar
   , modifyMVar
   )
-import Control.DeepSeq (NFData, ($!!))
+import Control.DeepSeq (NFData(..), ($!!))
 import Control.Distributed.Process hiding (send)
 import qualified Control.Distributed.Process as P
   ( send
@@ -138,6 +138,10 @@ data Recipient =
 --  | GlobalReg String
   deriving (Typeable, Generic, Show, Eq)
 instance Binary Recipient where
+instance NFData Recipient where
+  rnf (Pid p) = rnf p `seq` ()
+  rnf (Registered s) = rnf s `seq` ()
+  rnf (RemoteRegistered s n) = rnf s `seq` rnf n `seq` ()
 
 -- useful exit reasons
 
