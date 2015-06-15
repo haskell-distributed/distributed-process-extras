@@ -6,6 +6,7 @@
 {-# LANGUAGE FlexibleInstances    #-}
 {-# LANGUAGE OverlappingInstances #-}
 {-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 
 -----------------------------------------------------------------------------
 -- |
@@ -134,10 +135,9 @@ data SetLevel = SetLevel !LogLevel
 instance Binary SetLevel where
 instance NFData SetLevel where rnf x = x `seq` ()
 
-data AddFormatter = AddFormatter !(Closure (Message -> Process (Maybe String)))
-  deriving (Typeable, Generic)
-instance Binary AddFormatter where
-instance NFData AddFormatter where rnf x = x `seq` ()
+newtype AddFormatter = AddFormatter (Closure (Message -> Process (Maybe String)))
+  deriving (Typeable, Generic, NFData)
+instance Binary AddFormatter
 
 data LogState =
   LogState { output      :: !(String -> Process ())
