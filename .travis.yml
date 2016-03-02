@@ -27,9 +27,9 @@ install:
 
 script:
   - stack -j 2 test --no-terminal --only-snapshot --coverage
-  - stack exec shc --repo-token=$REPO_TOKEN distributed-process-extras TimerTests
-  - stack exec shc --repo-token=$REPO_TOKEN distributed-process-extras PrimitivesTests
-  - stack exec shc --repo-token=$REPO_TOKEN distributed-process-extras LoggerTests
+  - stack exec shc -- --repo-token=$REPO_TOKEN distributed-process-extras TimerTests
+  - stack exec shc -- --repo-token=$REPO_TOKEN distributed-process-extras PrimitivesTests
+  - stack exec shc -- --repo-token=$REPO_TOKEN distributed-process-extras LoggerTests
 
 notifications:
   slack:
