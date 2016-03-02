@@ -8,10 +8,8 @@ cache:
 matrix:
   include:
   - env: CABALVER=1.22 GHCVER=7.8.4
-    secure: awCqPgzrmFol6PTJBpKHibSmgJ9PDD3lDgRoBwQSqYaihrXG/JvzOHt4b77uJIAr8wT7UyYkJxFGb4M7KwURJN3QCSJ5KbB8Rj2blKN9Tb7o0VgdThNT3apzmycy/wniitnHuxupMvyeWmDKJtwP2V/DuGTYF8KKzSluVejRr3A=
     addons: {apt: {packages: [cabal-install-1.22,ghc-7.8.4], sources: [hvr-ghc]}}
   - env: CABALVER=1.22 GHCVER=7.10.2
-    secure: awCqPgzrmFol6PTJBpKHibSmgJ9PDD3lDgRoBwQSqYaihrXG/JvzOHt4b77uJIAr8wT7UyYkJxFGb4M7KwURJN3QCSJ5KbB8Rj2blKN9Tb7o0VgdThNT3apzmycy/wniitnHuxupMvyeWmDKJtwP2V/DuGTYF8KKzSluVejRr3A=
     addons: {apt: {packages: [cabal-install-1.22,ghc-7.10.3],sources: [hvr-ghc]}}
 
 before_install:
@@ -27,9 +25,9 @@ install:
 
 script:
   - stack -j 2 test --no-terminal --only-snapshot --coverage
-  - stack exec shc -- --repo-token=$REPO_TOKEN distributed-process-extras TimerTests
-  - stack exec shc -- --repo-token=$REPO_TOKEN distributed-process-extras PrimitivesTests
-  - stack exec shc -- --repo-token=$REPO_TOKEN distributed-process-extras LoggerTests
+  - shc --repo-token=fztBYmsHeOuFSKXzSZoNDiEt8NcrbMRsh distributed-process-extras TimerTests
+  - shc --repo-token=fztBYmsHeOuFSKXzSZoNDiEt8NcrbMRsh distributed-process-extras PrimitivesTests
+  - shc --repo-token=fztBYmsHeOuFSKXzSZoNDiEt8NcrbMRsh distributed-process-extras LoggerTests
 
 notifications:
   slack:
