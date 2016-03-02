@@ -1,6 +1,9 @@
 language: c
 
 sudo: false
+cache:
+  directories:
+  - $HOME/.stack/
 
 env:
   global:
@@ -30,16 +33,14 @@ before_install:
   - export PATH=~/.local/bin:$PATH
   - travis_retry curl -L https://www.stackage.org/stack/linux-x86_64 | tar -xzO --wildcards '*/stack' > ~/.local/bin/stack
   - chmod a+x ~/.local/bin/stack
+  - stack install stack-hpc-coveralls
+  - openssl aes-256-cbc -K $encrypted_035c7f85af6d_key -iv $encrypted_035c7f85af6d_iv -in .coveralls.yml.enc -out .coveralls.yml -d
 
 install:
   - stack -j 2 setup --no-terminal
 
 script:
   - stack -j 2 test --no-terminal --only-snapshot --coverage
-
-after_script:
-  - travis_retry curl -L https://github.com/rubik/stack-hpc-coveralls/releases/download/v0.0.3.0/shc-linux-x64-$GHCVER.tar.bz2 | tar -xj
-  - chmod a+x shc
   - shc --partial-coverage --repo-token=$REPO_TOKEN distributed-process-extras TimerTests
   - shc --partial-coverage --repo-token=$REPO_TOKEN distributed-process-extras PrimitivesTests
   - shc --partial-coverage --repo-token=$REPO_TOKEN distributed-process-extras LoggerTests
@@ -47,3 +48,4 @@ after_script:
 notifications:
   slack:
     secure: g0NP1tkOe3+kI6O0Q1mgT/jPaLjxQ31J26MWouicu2F1Y3p73qTvv/QsOkafRMZDn07HlzgviCP25r7Ytg32pUAFvOh4U4MT2MpO0jUVVGPi4ZiwB+W5AH+HlDtJSickeSZ0AjXZSaGv8nQNegWkeaLQgLBIzrTHU8s0Y9K+whQ=
+
