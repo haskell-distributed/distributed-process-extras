@@ -2,12 +2,28 @@ language: c
 
 sudo: false
 
+env:
+  global:
+    - secure: awCqPgzrmFol6PTJBpKHibSmgJ9PDD3lDgRoBwQSqYaihrXG/JvzOHt4b77uJIAr8wT7UyYkJxFGb4M7KwURJN3QCSJ5KbB8Rj2blKN9Tb7o0VgdThNT3apzmycy/wniitnHuxupMvyeWmDKJtwP2V/DuGTYF8KKzSluVejRr3A=
+
 matrix:
   include:
-    - env: CABALVER=1.22 GHCVER=7.8.4
-      addons: {apt: {packages: [cabal-install-1.22,ghc-7.8.4], sources: [hvr-ghc]}}
-    - env: CABALVER=1.22 GHCVER=7.10.3
-      addons: {apt: {packages: [cabal-install-1.22,ghc-7.10.3],sources: [hvr-ghc]}}
+  - env: CABALVER=1.22 GHCVER=7.8.4
+      addons:
+        apt:
+          packages:
+            - cabal-install-1.22
+            - ghc-7.8.4
+          sources:
+            - hvr-ghc
+  - env: CABALVER=1.22 GHCVER=7.10.2
+    addons:
+      apt:
+        packages:
+          - cabal-install-1.22
+          - ghc-7.10.2
+        sources:
+          - hvr-ghc
 
 before_install:
   - mkdir -p ~/.local/bin
@@ -17,8 +33,17 @@ before_install:
 
 install:
   - stack -j 2 setup --no-terminal
-  - stack -j 2 build --only-snapshot --no-terminal
 
 script:
-  - stack -j 2 test --no-terminal
+  - stack -j 2 test --no-terminal --only-snapshot --coverage
 
+after_script:
+  - travis_retry curl -L https://github.com/rubik/stack-hpc-coveralls/releases/download/v0.0.3.0/shc-linux-x64-$GHCVER.tar.bz2 | tar -xj
+  - chmod a+x shc
+  - shc --partial-coverage --repo-token=$REPO_TOKEN distributed-process-extras TimerTests
+  - shc --partial-coverage --repo-token=$REPO_TOKEN distributed-process-extras PrimitivesTests
+  - shc --partial-coverage --repo-token=$REPO_TOKEN distributed-process-extras LoggerTests
+
+notifications:
+  slack:
+    secure: g0NP1tkOe3+kI6O0Q1mgT/jPaLjxQ31J26MWouicu2F1Y3p73qTvv/QsOkafRMZDn07HlzgviCP25r7Ytg32pUAFvOh4U4MT2MpO0jUVVGPi4ZiwB+W5AH+HlDtJSickeSZ0AjXZSaGv8nQNegWkeaLQgLBIzrTHU8s0Y9K+whQ=
