@@ -17,17 +17,15 @@ before_install:
   - export PATH=~/.local/bin:$PATH
   - travis_retry curl -L https://www.stackage.org/stack/linux-x86_64 | tar -xzO --wildcards '*/stack' > ~/.local/bin/stack
   - chmod a+x ~/.local/bin/stack
-  - openssl aes-256-cbc -K $encrypted_035c7f85af6d_key -iv $encrypted_035c7f85af6d_iv -in .coveralls.yml.enc -out .coveralls.yml -d
+#  - openssl aes-256-cbc -K $encrypted_035c7f85af6d_key -iv $encrypted_035c7f85af6d_iv -in .coveralls.yml.enc -out .coveralls.yml -d
 
 install:
   - stack -j 2 setup --no-terminal
-  - stack install stack-hpc-coveralls
+  - stack -j 2 build --no-terminal
+ # - stack install stack-hpc-coveralls
 
 script:
-  - stack -j 2 test --no-terminal --only-snapshot --coverage
-  - shc --repo-token=fztBYmsHeOuFSKXzSZoNDiEt8NcrbMRsh distributed-process-extras TimerTests
-  - shc --repo-token=fztBYmsHeOuFSKXzSZoNDiEt8NcrbMRsh distributed-process-extras PrimitivesTests
-  - shc --repo-token=fztBYmsHeOuFSKXzSZoNDiEt8NcrbMRsh distributed-process-extras LoggerTests
+  - stack -j 2 test --no-terminal
 
 notifications:
   slack:
