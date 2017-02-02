@@ -2,12 +2,17 @@ language: c
 
 sudo: false
 
+cache:
+  directories:
+    - $HOME/.stack
+    - $HOME/.cabal/packages
+
 matrix:
   include:
     - env: CABALVER=1.22 GHCVER=7.8.4
       compiler: ": #GHC 7.8.4"
       addons: {apt: {packages: [cabal-install-1.24,ghc-7.8.4], sources: [hvr-ghc]}}
-    - env: CABALVER=1.22 GHCVER=7.10.3
+    - env: CABALVER=1.22 GHCVER=7.10.3 ARGS="--stack-yaml stack-ghc-7.10.3.yaml"
       compiler: ": #GHC 7.10.3"
       addons: {apt: {packages: [cabal-install-1.24,ghc-7.10.3],sources: [hvr-ghc]}}
     - env: CABALVER=1.24 GHCVER=8.0.1
@@ -21,12 +26,8 @@ before_install:
   - chmod a+x ~/.local/bin/stack
   - export PATH=/opt/ghc/$GHCVER/bin:/opt/cabal/$CABALVER/bin:$PATH
 
-install:
-  - stack -j 2 setup --no-terminal --no-install-ghc --skip-ghc-check
-  - stack -j 2 build --only-snapshot --no-terminal --system-ghc --skip-ghc-check
-
 script:
-  - stack -j 2 test --no-terminal --system-ghc
+  - stack test --no-terminal --system-ghc
 
 notifications:
   slack:
