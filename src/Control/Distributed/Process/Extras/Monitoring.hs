@@ -18,6 +18,9 @@
 -- the caller will receive a 'NodeUp' message in its mailbox. If a node
 -- disconnects, a corollary 'NodeDown' message will be delivered as well.
 --
+-- When the client process first registers, events will be sent for each
+-- connection the monitor process currently knows about.
+--
 -----------------------------------------------------------------------------
 
 module Control.Distributed.Process.Extras.Monitoring
@@ -44,6 +47,12 @@ import Control.Distributed.Process.Management
   , mxNotify
   )
 import Control.Distributed.Process.Extras (deliver)
+import Data.Accessor
+  ( Accessor
+  , accessor
+  , (^:)
+  , (^.)
+  )
 import Data.Binary
 import qualified Data.Foldable as Foldable
 import Data.HashSet (HashSet)
@@ -51,6 +60,8 @@ import qualified Data.HashSet as Set
 
 import Data.Typeable (Typeable)
 import GHC.Generics
+
+import Network.Transport (EndPointAddress)
 
 data Register = Register !ProcessId
   deriving (Typeable, Generic)
@@ -77,6 +88,16 @@ data NodeDown = NodeDown !NodeId
   deriving (Typeable, Generic, Show)
 instance Binary NodeDown where
 instance NFData NodeDown where
+
+data State = State { _clients :: HashSet ProcessId
+                   , _nodes   :: HashSet EndPointAddress
+                   }
+
+clients :: Accessor State (HashSet ProcessId)
+clients = accessor _clients (\act' st -> st { _clients = act' })
+
+nodes :: Accessor State (HashSet EndPointAddress)
+nodes = accessor _nodes (\act' st -> st { _nodes = act' })
 
 -- | The @MxAgentId@ for the node monitoring agent.
 nodeMonitorAgentId :: MxAgentId
@@ -115,25 +136,31 @@ nodeMonitor :: Process ProcessId
 nodeMonitor = do
   mxAgent nodeMonitorAgentId initState [
         (mxSink $ \(Register pid) -> do
-            mxSetLocal . Set.insert pid =<< mxGetLocal
+            st <- mxGetLocal
+            -- we want to ensure we notify newly registered clients of
+            -- nodes we already know are up...
+            Foldable.mapM_ (liftMX . send pid . NodeUp . NodeId) $ (^. nodes) st
+            mxSetLocal $ (clients ^: Set.insert pid) st
             mxReady)
       , (mxSink $ \(UnRegister pid) -> do
-            mxSetLocal . Set.delete pid =<< mxGetLocal
+            st <- mxGetLocal
+            mxSetLocal $ (clients ^: Set.delete pid) st
             mxReady)
-      , (mxSink $ \ev -> do
-            let act =
-                  case ev of
-                    (MxConnected    _ ep) -> notify $ nodeUp ep
-                    (MxDisconnected _ ep) -> notify $ nodeDown ep
-                    _                     -> return ()
-            act >> mxReady)
+      , (mxSink $ \ev -> storeAndNotify (checkEvent ev) >> mxReady)
     ]
   where
-    initState :: HashSet ProcessId
-    initState = Set.empty
+    initState :: State
+    initState = State { _clients = Set.empty, _nodes = Set.empty }
 
-    notify msg = Foldable.mapM_ (liftMX . deliver msg) =<< mxGetLocal
+    storeAndNotify Nothing        = return ()
+    storeAndNotify (Just (f, ep)) =
+        f ep >> mxGetLocal >>= mxSetLocal . (nodes ^: Set.insert ep)
 
-    nodeUp = NodeUp . NodeId
-    nodeDown = NodeDown . NodeId
+    checkEvent (MxConnected    _ ep) = Just (nodeUp, ep)
+    checkEvent (MxDisconnected _ ep) = Just (nodeDown, ep)
+    checkEvent _                     = Nothing
 
+    notify msg = Foldable.mapM_ (liftMX . deliver msg) . _clients =<< mxGetLocal
+
+    nodeUp   = notify . NodeUp . NodeId
+    nodeDown = notify . NodeDown . NodeId

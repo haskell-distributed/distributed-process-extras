@@ -90,8 +90,6 @@ testLinkingWithAbnormalExits result = do
 
 testMonitorNodeDeath :: NT.Transport -> TestResult () -> Process ()
 testMonitorNodeDeath transport result = do
-    void $ nodeMonitor >> monitorNodes   -- start node monitoring
-
     nid1 <- getSelfNode
     nid2 <- liftIO $ newEmptyMVar
     nid3 <- liftIO $ newEmptyMVar
@@ -102,6 +100,8 @@ testMonitorNodeDeath transport result = do
     -- sending to (nodeId, "ignored") is a short cut to force a connection
     liftIO $ tryForkProcess node2 $ ensureNodeRunning nid2 (nid1, "ignored")
     liftIO $ tryForkProcess node3 $ ensureNodeRunning nid3 (nid1, "ignored")
+
+    void $ nodeMonitor >> monitorNodes   -- start node monitoring
 
     NodeUp _ <- expect
     NodeUp _ <- expect
