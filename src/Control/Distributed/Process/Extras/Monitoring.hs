@@ -25,8 +25,7 @@
 
 module Control.Distributed.Process.Extras.Monitoring
   (
-    NodeUp(..)
-  , NodeDown(..)
+    NodeStatus(..)
   , nodeMonitorAgentId
   , nodeMonitor
   , monitorNodes
@@ -34,9 +33,10 @@ module Control.Distributed.Process.Extras.Monitoring
   ) where
 
 import Control.DeepSeq (NFData)
-import Control.Distributed.Process  -- NB: requires NodeId(..) to be exported!
+import Control.Distributed.Process hiding (NodeId)
+import Control.Distributed.Process.Internal.Types (NodeId(..))
 import Control.Distributed.Process.Management
-  ( MxEvent(MxConnected, MxDisconnected)
+  ( MxEvent(MxConnected, MxDisconnected, MxNodeDied)
   , MxAgentId(..)
   , mxAgent
   , mxSink
@@ -63,31 +63,23 @@ import GHC.Generics
 
 import Network.Transport (EndPointAddress)
 
-data Register = Register !ProcessId
+newtype Register = Register ProcessId
   deriving (Typeable, Generic)
 instance Binary Register where
 instance NFData Register where
 
-data UnRegister = UnRegister !ProcessId
+newtype UnRegister = UnRegister ProcessId
   deriving (Typeable, Generic)
 instance Binary UnRegister where
 instance NFData UnRegister where
 
--- | Sent to subscribing processes when a connection
--- (from a remote node) is detected.
+-- | Sent to subscribing processes when a connection or
+-- disconnection (from a remote node) is detected.
 --
-data NodeUp = NodeUp !NodeId
+data NodeStatus = NodeUp !NodeId | NodeDown !NodeId
   deriving (Typeable, Generic, Show)
-instance Binary NodeUp where
-instance NFData NodeUp where
-
--- | Sent to subscribing processes when a dis-connection
--- (from a remote node) is detected.
---
-data NodeDown = NodeDown !NodeId
-  deriving (Typeable, Generic, Show)
-instance Binary NodeDown where
-instance NFData NodeDown where
+instance Binary NodeStatus where
+instance NFData NodeStatus where
 
 data State = State { _clients :: HashSet ProcessId
                    , _nodes   :: HashSet EndPointAddress
@@ -114,18 +106,14 @@ nodeMonitorAgentId = MxAgentId "service.monitoring.nodes"
 -- a message from the node monitoring agent.
 --
 monitorNodes :: Process ()
-monitorNodes = do
-  us <- getSelfPid
-  mxNotify $ Register us
+monitorNodes = mxNotify . Register =<< getSelfPid
 
 -- | Stop monitoring node connection/disconnection events. This does not
 -- flush the caller's mailbox, nor does it guarantee that any/all node
 -- up/down notifications will have been delivered before it is evaluated.
 --
 unmonitorNodes :: Process ()
-unmonitorNodes = do
-  us <- getSelfPid
-  mxNotify $ UnRegister us
+unmonitorNodes = mxNotify . UnRegister =<< getSelfPid
 
 -- | Starts the node monitoring agent. No call to @monitorNodes@ and
 -- @unmonitorNodes@ will have any effect unless the agent is already
@@ -133,7 +121,7 @@ unmonitorNodes = do
 -- timeliness or ordering semantics of node monitoring notifications.
 --
 nodeMonitor :: Process ProcessId
-nodeMonitor = do
+nodeMonitor =
   mxAgent nodeMonitorAgentId initState [
         (mxSink $ \(Register pid) -> do
             st <- mxGetLocal
@@ -146,21 +134,24 @@ nodeMonitor = do
             st <- mxGetLocal
             mxSetLocal $ (clients ^: Set.delete pid) st
             mxReady)
-      , (mxSink $ \ev -> storeAndNotify (checkEvent ev) >> mxReady)
+      , (mxSink $ \ev -> maybeNotify ev >> mxReady)
     ]
   where
     initState :: State
     initState = State { _clients = Set.empty, _nodes = Set.empty }
 
-    storeAndNotify Nothing        = return ()
-    storeAndNotify (Just (f, ep)) =
-        f ep >> mxGetLocal >>= mxSetLocal . (nodes ^: Set.insert ep)
+    maybeNotify (MxConnected    _   ep) = notify (nodeUp ep) >> store ep
+    maybeNotify (MxDisconnected _   ep) = notify $ nodeDown ep
+    maybeNotify (MxNodeDied     nid _ ) = notify $ nodeDown $ nodeAddress nid
+    maybeNotify _                       = return ()
+    -- when network errors cause disconnection, we don't always get
+    -- a nice disconnected event..
 
-    checkEvent (MxConnected    _ ep) = Just (nodeUp, ep)
-    checkEvent (MxDisconnected _ ep) = Just (nodeDown, ep)
-    checkEvent _                     = Nothing
+    store ep = do
+      st <- mxGetLocal
+      mxSetLocal $ (nodes ^: Set.insert ep) st
 
     notify msg = Foldable.mapM_ (liftMX . deliver msg) . _clients =<< mxGetLocal
 
-    nodeUp   = notify . NodeUp . NodeId
-    nodeDown = notify . NodeDown . NodeId
+    nodeUp   = NodeUp . NodeId
+    nodeDown = NodeDown . NodeId
