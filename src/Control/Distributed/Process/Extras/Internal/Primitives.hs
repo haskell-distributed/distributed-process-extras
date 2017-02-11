@@ -44,6 +44,7 @@ module Control.Distributed.Process.Extras.Internal.Primitives
   , awaitResponse
 
     -- * General Utilities
+  , self
   , times
   , monitor
   , awaitExit
@@ -55,10 +56,15 @@ module Control.Distributed.Process.Extras.Internal.Primitives
   , __remoteTable
   ) where
 
+import Control.Applicative (liftA2)
 import Control.Concurrent (myThreadId, throwTo)
-import Control.Distributed.Process hiding (monitor)
+import Control.Distributed.Process hiding (monitor, ProcessId)
 import qualified Control.Distributed.Process as P (monitor)
 import Control.Distributed.Process.Closure (seqCP, remotable, mkClosure)
+import Control.Distributed.Process.Internal.Types
+  ( LocalProcess(processId, processNode)
+  , ProcessId(..)
+  )
 import Control.Distributed.Process.Serializable (Serializable)
 import Control.Distributed.Process.Extras.Internal.Types
   ( Addressable
@@ -71,9 +77,14 @@ import Control.Distributed.Process.Extras.Internal.Types
   , whereisRemote
   )
 import Control.Monad (void)
+import Control.Monad.Reader (asks)
 import Data.Maybe (isJust, fromJust)
 
 -- utility
+
+-- | Convenience wrapper to acquire our pid and nodeId in one expression
+self :: Process (ProcessId, NodeId)
+self = asks (liftA2 (,) processId (processNodeId . processId))
 
 -- | Monitor any @Resolvable@ object.
 --
