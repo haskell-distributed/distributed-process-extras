@@ -82,7 +82,7 @@ testMonitorNodeDeath transport internals result = do
 
     traceLog "starting local heartbeat process"
 
-    _ <- spawnLocal $ startHeartbeatServer $ seconds 2
+    _ <- startHeartbeatService $ seconds 2
 
     traceLog "waiting for NodeUp (due to heartbeats)"
 
