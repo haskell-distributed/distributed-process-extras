@@ -1,6 +1,6 @@
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE DeriveGeneric      #-}
-
+{-# LANGUAGE DeriveDataTypeable  #-}
+{-# LANGUAGE DeriveGeneric       #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  Control.Distributed.Process.Extras.Monitoring
@@ -27,9 +27,11 @@ module Control.Distributed.Process.Extras.Monitoring
   (
     NodeStatus(..)
   , nodeMonitorAgentId
+  , nodeMonitorServiceName
   , nodeMonitor
   , monitorNodes
   , unmonitorNodes
+  , nodes
   ) where
 
 import Control.DeepSeq (NFData)
@@ -82,18 +84,21 @@ instance Binary NodeStatus where
 instance NFData NodeStatus where
 
 data State = State { _clients :: HashSet ProcessId
-                   , _nodes   :: HashSet EndPointAddress
+                   , _peers   :: HashSet EndPointAddress
                    }
 
 clients :: Accessor State (HashSet ProcessId)
 clients = accessor _clients (\act' st -> st { _clients = act' })
 
-nodes :: Accessor State (HashSet EndPointAddress)
-nodes = accessor _nodes (\act' st -> st { _nodes = act' })
+peers :: Accessor State (HashSet EndPointAddress)
+peers = accessor _peers (\act' st -> st { _peers = act' })
+
+nodeMonitorServiceName :: String
+nodeMonitorServiceName = "service.monitoring.nodes"
 
 -- | The @MxAgentId@ for the node monitoring agent.
 nodeMonitorAgentId :: MxAgentId
-nodeMonitorAgentId = MxAgentId "service.monitoring.nodes"
+nodeMonitorAgentId = MxAgentId nodeMonitorServiceName
 
 -- | Start monitoring node connection/disconnection events. When a
 -- connection event occurs, the calling process will receive a message
@@ -115,6 +120,12 @@ monitorNodes = mxNotify . Register =<< getSelfPid
 unmonitorNodes :: Process ()
 unmonitorNodes = mxNotify . UnRegister =<< getSelfPid
 
+nodes :: Process [NodeId]
+nodes = do
+  (sp, rp) <- newChan
+  nsend nodeMonitorServiceName sp
+  receiveChan rp
+
 -- | Starts the node monitoring agent. No call to @monitorNodes@ and
 -- @unmonitorNodes@ will have any effect unless the agent is already
 -- running. Note that we make /no guarantees what-so-ever/ about the
@@ -126,19 +137,23 @@ nodeMonitor =
         (mxSink $ \(Register pid) -> do
             st <- mxGetLocal
             -- we want to ensure we notify newly registered clients of
-            -- nodes we already know are up...
-            Foldable.mapM_ (liftMX . send pid . NodeUp . NodeId) $ (^. nodes) st
+            -- peers we already know are up...
+            Foldable.mapM_ (liftMX . send pid . NodeUp . NodeId) $ (^. peers) st
             mxSetLocal $ (clients ^: Set.insert pid) st
             mxReady)
       , (mxSink $ \(UnRegister pid) -> do
             st <- mxGetLocal
             mxSetLocal $ (clients ^: Set.delete pid) st
             mxReady)
+      , (mxSink $ \(sp :: (SendPort [NodeId])) -> do
+            st <- mxGetLocal
+            liftMX $ sendChan sp $ Set.toList $ Set.map NodeId (st ^. peers)
+            mxReady)
       , (mxSink $ \ev -> maybeNotify ev >> mxReady)
     ]
   where
     initState :: State
-    initState = State { _clients = Set.empty, _nodes = Set.empty }
+    initState = State { _clients = Set.empty, _peers = Set.empty }
 
     maybeNotify (MxConnected    _   ep) = notify (nodeUp ep) >> store ep
     maybeNotify (MxDisconnected _   ep) = notify $ nodeDown ep
@@ -149,7 +164,7 @@ nodeMonitor =
 
     store ep = do
       st <- mxGetLocal
-      mxSetLocal $ (nodes ^: Set.insert ep) st
+      mxSetLocal $ (peers ^: Set.insert ep) st
 
     notify msg = Foldable.mapM_ (liftMX . deliver msg) . _clients =<< mxGetLocal
 
