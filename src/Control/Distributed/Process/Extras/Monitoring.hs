@@ -32,6 +32,8 @@ module Control.Distributed.Process.Extras.Monitoring
   , monitorNodes
   , unmonitorNodes
   , nodes
+  , Register(..)
+  , UnRegister(..)
   ) where
 
 import Control.DeepSeq (NFData)

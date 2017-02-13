@@ -39,9 +39,12 @@
 module Control.Distributed.Process.Extras.Heartbeat
   ( startHeartbeatService
   -- , stopHeartbeatService
+  , configureTimeout
   , serviceName
   , serverName
-  , NodeUnresponsive(..)
+  , registerListener
+  , unregisterListener
+  , NodeUnresponsive(nodeId, tickTime)
   ) where
 
 import Control.DeepSeq (NFData)
@@ -52,13 +55,12 @@ import Control.Distributed.Process.Internal.Types
   , LocalProcess(processNode)
   )
 import Control.Distributed.Process.Internal.Messaging (disconnect)
-import Control.Distributed.Process.Extras
-  ( Routable(..)
-  , spawnSignalled
-  )
 import Control.Distributed.Process.Extras.Internal.Primitives
   ( self
+  , spawnSignalled
+  , deliver
   )
+import Control.Distributed.Process.Extras.Internal.Types (Routable(..))
 import Control.Distributed.Process.Extras.Timer
   ( periodically
   , TimerRef
@@ -75,21 +77,21 @@ import Control.Distributed.Process.Management
   , liftMX
   , mxGetLocal
   , mxSetLocal
-  , mxNotify
+  , mxUpdateLocal
   )
 import qualified Control.Distributed.Process.Extras.Monitoring as NodeMon
-import Control.Distributed.Process.Extras.Time (TimeInterval, asTimeout)
-import Data.Accessor
-  ( Accessor
-  , accessor
-  , (^:)
-  , (^.)
-  , (^=)
+import Control.Distributed.Process.Extras.Monitoring
+  ( Register(..)
+  , UnRegister(..)
   )
+import Control.Distributed.Process.Extras.Time (TimeInterval, asTimeout)
 import Control.Monad.Reader (ask)
 import Data.Binary
 import Data.HashSet (HashSet)
 import qualified Data.HashSet as Set
+import Data.HashMap.Strict (HashMap)
+import qualified Data.HashMap.Strict as Map
+import Data.Traversable (mapM)
 import Data.Foldable (mapM_)
 import Data.Typeable (Typeable)
 import GHC.Generics
@@ -117,7 +119,7 @@ heartbeatAgentId :: MxAgentId
 heartbeatAgentId = MxAgentId serviceName
 
 configureTimeout :: TimeInterval -> Process ()
-configureTimeout ti = do
+configureTimeout ti =
   doConfigureTimeout ti (nsend serviceName)
 
 doConfigureTimeout :: TimeInterval
@@ -127,26 +129,32 @@ doConfigureTimeout ti sender = do
   (sp, rp) <- newChan
   sender (ti, sp) >> receiveChan rp
 
+-- | Blah
+--
+-- No guaranatee is made about the timeliness of the delivery, nor can
+-- the receiver expect that the node (for which it is being notified)
+-- is still up/connected or down/disconnected at the point when it receives
+-- a message from the service (i.e., the connection state of the peer may
+-- have changed by the time the message arrives).
+--
+registerListener :: Process ()
+registerListener = nsend serviceName . Register =<< getSelfPid
+
+-- | Stop listening for node unresponsive events. This does not
+-- flush the caller's mailbox, nor does it guarantee that any/all node
+-- unresponsive notifications will have been delivered before it is evaluated.
+--
+unregisterListener :: Process ()
+unregisterListener = nsend serviceName . UnRegister =<< getSelfPid
+
 -- Agent implementation
 
-data HBAgent = HBAgent { _node     :: NodeId
-                       , _hbDelay  :: TimeInterval
-                       , _hbServer :: ProcessId
-                       , _clients  :: HashSet ProcessId
+data HBAgent = HBAgent { node     :: NodeId
+                       , hbDelay  :: TimeInterval
+                       , hbServer :: ProcessId
+                       , clients  :: HashSet ProcessId
                        }
              | HBAgentBoot
-
-node :: Accessor HBAgent NodeId
-node = accessor _node (\act' st -> st { _node = act' })
-
-hbDelay :: Accessor HBAgent TimeInterval
-hbDelay = accessor _hbDelay (\act' st -> st { _hbDelay = act' })
-
-hbServer :: Accessor HBAgent ProcessId
-hbServer = accessor _hbServer (\act' st -> st { _hbServer = act' })
-
-clients :: Accessor HBAgent (HashSet ProcessId)
-clients = accessor _clients (\act' st -> st { _clients = act' })
 
 -- | Starts the heartbeat service
 startHeartbeatService :: TimeInterval -> Process ProcessId
@@ -154,15 +162,25 @@ startHeartbeatService ti = do
   pid <- mxAgent heartbeatAgentId
                  HBAgentBoot
                  [ mxSink handleConfig
-                 , mxSink handleMxEvent ]
+                 , mxSink handleMxEvent
+                 , mxSink (\(ev :: NodeUnresponsive) -> do
+                      mapM_ (liftMX . deliver ev) . clients =<< mxGetLocal
+                      mxReady)
+                 , mxSink (\(Register pid) -> updateClients (Set.insert pid))
+                 , mxSink (\(UnRegister pid) -> updateClients (Set.delete pid))
+                 ]
   doConfigureTimeout ti (send pid :: (TimeInterval, SendPort()) -> Process ())
   return pid
 
   where
 
+    updateClients op = do
+      mxUpdateLocal $ \st@HBAgent{ clients = c } -> st { clients = op c }
+      mxReady
+
     handleConfig :: (TimeInterval, SendPort ()) -> MxAgent HBAgent MxAction
     handleConfig (t, c) =
-      mxGetLocal >>= configureAgent t >> (liftMX $ sendChan c ()) >> mxReady
+      mxGetLocal >>= configureAgent t >> liftMX (sendChan c ()) >> mxReady
 
     configureAgent curTi st
       | HBAgentBoot <- st = do
@@ -170,74 +188,60 @@ startHeartbeatService ti = do
             us' <- getSelfNode
             sv' <- spawnSignalled NodeMon.nodes (startHeartbeatServer curTi)
             return (us', sv')
-          mxSetLocal $ ( (node     ^= us)
-                       . (hbDelay  ^= curTi)
-                       . (hbServer ^= sv)
-                       $ HBAgent{} )
-      | otherwise = liftMX $ send (st ^. hbServer) curTi
+          mxSetLocal HBAgent{ node     = us
+                            , hbDelay  = curTi
+                            , hbServer = sv
+                            , clients  = Set.empty
+                            }
+      | HBAgent{ hbServer = pid } <- st = liftMX $ send pid curTi
 
     handleMxEvent :: MxEvent -> MxAgent HBAgent MxAction
     handleMxEvent ev = mxGetLocal >>= checkEv ev
 
     -- passing the state here is unnecessary but convenient
     checkEv :: MxEvent -> HBAgent -> MxAgent HBAgent MxAction
-    checkEv ev hbs
+    checkEv _  HBAgentBoot              = mxSkip
+    checkEv ev hbs@HBAgent{ node = n }
         | (MxNodeDied nid why)   <- ev
-        , nid /= (hbs ^. node)  -- do we really need to? It can't be us!
+        , nid /= n              -- do we really need to? It can't be us!
         , why `elem` [ DiedNormal
                      , DiedUnknownId
-                     , DiedDisconnect] = forwardToServer ev hbs
-        | (MxProcessDied who _)  <- ev = handleRestarts who hbs
-        | MxConnected{}          <- ev = forwardToServer ev hbs
-        | MxDisconnected{}       <- ev = forwardToServer ev hbs
-        | MxSent{}               <- ev = maybeForwardToServer ev =<< mxGetLocal
-        | otherwise                    = mxSkip
+                     , DiedDisconnect ] = forwardToServer ev hbs
+        | (MxProcessDied who _)  <- ev  = handleRestarts who hbs
+        | MxConnected{}          <- ev  = forwardToServer ev hbs
+        | MxDisconnected{}       <- ev  = forwardToServer ev hbs
+        | MxSent{}               <- ev  = maybeForwardToServer ev =<< mxGetLocal
+        | otherwise                     = mxSkip
 
-    maybeForwardToServer e@(MxSent origin _ _) st
+    maybeForwardToServer e@(MxSent origin _ _) st@HBAgent{node = n}
         | to' <- processNodeId origin
-        , to' /= (st ^. node) = forwardToServer e st
+        , to' /= n           = forwardToServer e st
         | otherwise          = mxReady
     maybeForwardToServer _ _ = mxReady
 
     -- it's gross that we need to think about Boot here, instead of only
     -- in the handlers that actually deal with booting up - a dual State
     -- interface would be a lot nicer - perhaps Agent s1 s2 MxAction ??
-    forwardToServer ev' hbs'
-        | HBAgentBoot <- hbs' = mxReady  -- do nothing while we're booting
-        | otherwise           = liftMX (send (hbs' ^. hbServer) ev') >> mxReady
 
-    handleRestarts pid sta
-        | pid == (sta ^. hbServer) = restartBoth sta
-        | otherwise                = mxReady
+    forwardToServer _   HBAgentBoot = liftMX terminate  -- state invariant
+    forwardToServer ev' HBAgent{ hbServer = sPid }
+                                    = liftMX (send sPid ev') >> mxReady
 
-    restartBoth s =
-      configureAgent (s ^. hbDelay) HBAgentBoot >> mxReady
+    handleRestarts _   HBAgentBoot = liftMX terminate   -- state invariant
+    handleRestarts pid sta@HBAgent{ hbServer = sPid' }
+        | pid == sPid' = restartBoth sta
+        | otherwise    = mxReady
 
-data Signal = Signal NodeId
-  deriving (Typeable, Generic, Eq, Show)
-instance Binary Signal where
+    restartBoth HBAgentBoot            = liftMX terminate -- state invariant
+    restartBoth HBAgent{ hbDelay = d } =
+      configureAgent d HBAgentBoot >> mxReady
 
-data HBServer = HBServer { _home     :: NodeId
-                         , _peers    :: HashSet NodeId
-                         , _unknowns :: HashSet NodeId
-                         , _delay    :: TimeInterval
-                         , _timerRef :: TimerRef
+data HBServer = HBServer { home     :: NodeId
+                         , delay    :: TimeInterval
+                         , peers    :: HashSet NodeId
+                         , tracked  :: HashMap NodeId Int
+                         , timerRef :: TimerRef
                          }
-
-peers :: Accessor HBServer (HashSet NodeId)
-peers = accessor _peers (\act' st -> st { _peers = act' })
-
-unknowns :: Accessor HBServer (HashSet NodeId)
-unknowns = accessor _unknowns (\act' st -> st { _unknowns = act' })
-
-home :: Accessor HBServer NodeId
-home = accessor _home (\act' st -> st { _home = act' })
-
-timeOut :: Accessor HBServer TimeInterval
-timeOut = accessor _delay (\act' st -> st { _delay = act' })
-
-timerRef :: Accessor HBServer TimerRef
-timerRef = accessor _timerRef (\act' st -> st { _timerRef = act' })
 
 serverName :: String
 serverName = "service.monitoring.heartbeat.server"
@@ -247,7 +251,7 @@ startHeartbeatServer ti elems = do
   (us, here) <- self
   register serverName us
   tm <- startTimeoutManager ti us
-  serve $ HBServer here (Set.fromList elems) Set.empty ti tm
+  serve $ HBServer here ti (Set.fromList elems) Map.empty tm
 
 startTimeoutManager :: TimeInterval -> ProcessId -> Process TimerRef
 startTimeoutManager ti pid =
@@ -264,61 +268,47 @@ startTimeoutManager ti pid =
 -- all other messages are filtered out
 
 serve :: HBServer -> Process ()
-serve hbs =
+serve hbs@HBServer{..} =
   maybeHeartbeat hbs =<<
     receiveTimeout
-          (asTimeout $ hbs ^. timeOut)
-          [ match (\(MxConnected    _   ep) ->
-              return $ update Set.insert (NodeId ep) hbs) -- tracking new peer
-          , match (\(MxDisconnected _   ep) -> -- valid removal of peer
-              return $ update Set.delete (NodeId ep) hbs)
-          , match (\(MxNodeDied     nid _)  ->
-              return $ update Set.delete nid hbs)
-          , match (\(MxSent origin  _   _)  ->
-              return $ (unknowns ^: Set.delete (processNodeId origin)) hbs)
-          , match (\(_ :: TimeInterval)     -> die "foo") -- return $ (timeOut ^= ti) hbs)
+          (asTimeout delay)
+          [ match (\(MxConnected _ ep) ->
+              return hbs { peers = Set.insert (NodeId ep) peers
+                         , tracked = Map.insert (NodeId ep) 1 tracked
+                         })
+            -- we can see the death of a peer in two ways
+          , match (\(MxDisconnected _ ep) -> cleanup hbs (NodeId ep))
+          , match (\(MxNodeDied nid _) -> cleanup hbs nid)
+          , match (\(MxSent origin _ _) ->
+              -- TODO: enforce the state invariant that we /cannot/ see
+              -- MxSent here if the origin node isn't in peers already
+              return hbs { tracked = Map.delete (processNodeId origin) tracked })
+          , match (\(_ :: TimeInterval) -> die "foo") -- return $ (timeOut ^= ti) hbs)
           ]
 
   where
 
-    update op ep' hbs' = ((peers ^: op ep') . (unknowns ^: op ep')) hbs'
+    cleanup ss@HBServer{ peers = p, tracked = tr} nid =
+      return ss { peers = Set.delete nid p
+                , tracked = Map.delete nid tr }
 
     -- if we timed out waiting then it's time to send a heartbeat
-    maybeHeartbeat s Nothing   = tick s >> serve s
+    maybeHeartbeat s Nothing   = tick s >>= serve
     maybeHeartbeat _ (Just s') = serve s'
 
-    tick :: HBServer -> Process ()
-    tick HBServer{..} = mapM_ (sendTick _home) _unknowns
+    tick :: HBServer -> Process HBServer
+    tick s@HBServer{ tracked = trPids } = do
+      tr <- mapM (checkTick s) $ Map.toList trPids
+      return $ s { tracked = Map.fromList tr }
+
+    checkTick HBServer{ home = h, delay = d } st@(there, count)
+      | count == 4 = alarm there d >> sendTick h there >> return st
+      | otherwise  = sendTick h there >> return (there, count + 1)
+
+    alarm n t = nsend serviceName (NodeUnresponsive n t)
 
     sendTick here nid = do
       us <- getSelfPid
       this <- processNode <$> ask
       sendTo (nid, serviceName) here
       liftIO $ disconnect this (ProcessIdentifier us) (NodeIdentifier nid)
-
---------------------------------------------------------------------------------
--- Timer Implementation                                                       --
---------------------------------------------------------------------------------
-
-{-
-startTimer :: Delay -> Process TimeoutSpec
-startTimer d
-  | Delay t <- d = do sig <- liftIO $ newEmptyTMVarIO
-                      tref <- runAfter t $ liftIO $ atomically $ putTMVar sig ()
-                      return (d, Just (tref, (readTMVar sig)))
-  | otherwise    = return (d, Nothing)
-
-
--- runs the timer process
-runTimer :: TimeInterval -> Process () -> Bool -> Process ()
-runTimer t proc cancelOnReset = do
-    cancel <- expectTimeout (asTimeout t)
-    -- say $ "cancel = " ++ (show cancel) ++ "\n"
-    case cancel of
-        Nothing     -> runProc cancelOnReset
-        Just Cancel -> return ()
-        Just Reset  -> if cancelOnReset then return ()
-                                        else runTimer t proc cancelOnReset
-  where runProc True  = proc
-        runProc False = proc >> runTimer t proc cancelOnReset
--}
