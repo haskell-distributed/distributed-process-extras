@@ -142,7 +142,7 @@ newtype AddFormatter = AddFormatter (Closure (Message -> Process (Maybe String))
 instance Binary AddFormatter
 
 data LogState =
-  LogState { output      :: !(String -> Process ())
+  LogState { output      :: !(LogLevel -> String -> Process ())
            , cleanup     :: !(Process ())
            , _level      :: !LogLevel
            , _format     :: !(String -> Process String)
@@ -166,7 +166,7 @@ instance Routable LogChan where
   unsafeSendTo _ = mxNotify
 
 type LogText = String
-instance NFSerializable LogText
+instance NFSerializable LogText  -- TODO: put this in Types.hs
 
 newtype LogClient = LogClient { agent :: ProcessId }
 instance Resolvable LogClient where
@@ -190,10 +190,12 @@ instance Logger LogClient where
   logMessage = sendTo
 
 instance Logger LogChan where
-  logMessage _ = mxNotify
+  logMessage _ = nsend logProcessName
+
+-- TODO: provide an mxPublish | mxNotify based API
 
 logProcessName :: String
-logProcessName = "service.systemlog"
+logProcessName = "service.logging"
 
 mxLogId :: MxAgentId
 mxLogId = MxAgentId logProcessName
@@ -206,7 +208,7 @@ report :: (Logger l)
        -> l
        -> String
        -> Process ()
-report f l = f l 
+report f l = f l
 
 client :: Process (Maybe LogClient)
 client = resolve logProcessName >>= return . maybe Nothing (Just . LogClient)
@@ -257,36 +259,34 @@ systemLogFile :: FilePath -> LogLevel -> LogFormat -> Process ProcessId
 systemLogFile path lvl fmt = do
   h <- liftIO $ openFile path AppendMode
   liftIO $ hSetBuffering h LineBuffering
-  systemLog (liftIO . hPutStrLn h) (liftIO (hClose h)) lvl fmt
+  systemLog (const $ liftIO . hPutStrLn h) (liftIO (hClose h)) lvl fmt
 
 -- | Start a /system logger/ process as a management agent.
 --
-systemLog :: (String -> Process ()) -- ^ This expression does the actual logging
-          -> (Process ())  -- ^ An expression used to clean up any residual state
-          -> LogLevel      -- ^ The initial 'LogLevel' to use
-          -> LogFormat     -- ^ An expression used to format logging messages/text
+systemLog :: (LogLevel -> String -> Process ()) -- ^ This expression does the actual logging
+          -> Process ()  -- ^ An expression used to clean up any residual state
+          -> LogLevel    -- ^ The initial 'LogLevel' to use
+          -> LogFormat   -- ^ An expression used to format logging messages/text
           -> Process ProcessId
 systemLog o c l f = go $ LogState o c l f defaultFormatters
   where
     go :: LogState -> Process ProcessId
-    go st = do
+    go st =
       mxAgentWithFinalize mxLogId st [
             -- these are the messages we're /really/ interested in
-            (mxSink $ \(m :: LogMessage) -> do
+            (mxSink $ \(m :: LogMessage) ->
                 case m of
-                  (LogMessage msg lvl) -> do
+                  (LogMessage msg lvl) ->
                     mxGetLocal >>= outputMin lvl msg >> mxReceive
                   (LogData dat lvl) -> handleRawMsg dat lvl)
-
             -- complex messages rely on properly registered formatters
-          , (mxSink $ \(ev :: MxEvent) -> do
+          , (mxSink $ \(ev :: MxEvent) ->
                 case ev of
                   (MxUser msg) -> handleRawMsg msg Debug
                   -- we treat trace/log events like regular log events at
                   -- a Debug level (only)
                   (MxLog  str) -> mxGetLocal >>= outputMin Debug str >> mxReceive
                   _            -> handleEvent ev >> mxReceive)
-
             -- command message handling
           , (mxSink $ \(SetLevel lvl) ->
                 mxGetLocal >>= mxSetLocal . (level ^= lvl) >> mxReceive)
@@ -309,10 +309,10 @@ systemLog o c l f = go $ LogState o c l f defaultFormatters
         Just str -> outputMin lvl' str st >> mxReceive
         Nothing  -> mxReceive  -- we cannot format a Message, so we ignore it
 
-    handleEvent (MxConnected    _ ep) = do
+    handleEvent (MxConnected    _ ep) =
           mxGetLocal >>= outputMin Notice
                                    ("Endpoint: " ++ (show ep) ++ " Disconnected")
-    handleEvent (MxDisconnected _ ep) = do
+    handleEvent (MxDisconnected _ ep) =
           mxGetLocal >>= outputMin Notice
                                    ("Endpoint " ++ (show ep) ++ " Connected")
     handleEvent _                     = return ()
@@ -328,7 +328,7 @@ systemLog o c l f = go $ LogState o c l f defaultFormatters
 
     outputMin minLvl msgData st =
       case minLvl >= (st ^. level) of
-        True  -> liftMX $ ((st ^. format) msgData >>= (output st))
+        True  -> liftMX ((st ^. format) msgData >>= (output st minLvl))
         False -> return ()
 
     defaultFormatters = [basicDataFormat]
@@ -344,4 +344,3 @@ format = accessor _format (\f s -> s { _format = f })
 
 formatters :: Accessor LogState [Message -> Process (Maybe String)]
 formatters = accessor _formatters (\n' st -> st { _formatters = n' })
-

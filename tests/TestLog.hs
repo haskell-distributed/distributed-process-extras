@@ -52,7 +52,7 @@ testLoggingProcess = do
   chan <- liftIO $ newTChanIO
   let cleanup  = return ()
   let format   = return
-  pid <- systemLog (writeLog chan) cleanup Debug format
+  pid <- systemLog (const $ writeLog chan) cleanup Debug format
   addFormatter pid logFormat
   sleep $ seconds 1
   return (pid, chan)
@@ -140,4 +140,3 @@ testMain builder = do
 
 main :: IO ()
 main = testMain $ tests
-
