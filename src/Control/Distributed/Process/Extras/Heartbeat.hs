@@ -33,6 +33,7 @@
 --
 -- [Overview]
 --
+-- timing is vaugue, ordering is not guaranteed, best efforts...
 --
 -----------------------------------------------------------------------------
 
@@ -61,10 +62,6 @@ import Control.Distributed.Process.Extras.Internal.Primitives
   , deliver
   )
 import Control.Distributed.Process.Extras.Internal.Types (Routable(..))
-import Control.Distributed.Process.Extras.Timer
-  ( periodically
-  , TimerRef
-  )
 import Control.Distributed.Process.Management
   ( MxEvent(..)
   , MxAgentId(..)
@@ -84,13 +81,18 @@ import Control.Distributed.Process.Extras.Monitoring
   ( Register(..)
   , UnRegister(..)
   )
+import Control.Distributed.Process.Extras.SystemLog
+  ( logChannel
+  )
+import qualified Control.Distributed.Process.Extras.SystemLog as Log
 import Control.Distributed.Process.Extras.Time (TimeInterval, asTimeout)
+import Control.Monad (foldM)
 import Control.Monad.Reader (ask)
 import Data.Binary
 import Data.HashSet (HashSet)
 import qualified Data.HashSet as Set
-import Data.HashMap.Strict (HashMap)
-import qualified Data.HashMap.Strict as Map
+import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
 import Data.Traversable (mapM)
 import Data.Foldable (mapM_)
 import Data.Typeable (Typeable)
@@ -127,7 +129,8 @@ doConfigureTimeout :: TimeInterval
                    ->  Process ()
 doConfigureTimeout ti sender = do
   (sp, rp) <- newChan
-  sender (ti, sp) >> receiveChan rp
+  sender (ti, sp)
+  receiveChan rp
 
 -- | Blah
 --
@@ -154,7 +157,7 @@ data HBAgent = HBAgent { node     :: NodeId
                        , hbServer :: ProcessId
                        , clients  :: HashSet ProcessId
                        }
-             | HBAgentBoot
+             | HBAgentBoot deriving (Show)
 
 -- | Starts the heartbeat service
 startHeartbeatService :: TimeInterval -> Process ProcessId
@@ -179,8 +182,10 @@ startHeartbeatService ti = do
       mxReady
 
     handleConfig :: (TimeInterval, SendPort ()) -> MxAgent HBAgent MxAction
-    handleConfig (t, c) =
-      mxGetLocal >>= configureAgent t >> liftMX (sendChan c ()) >> mxReady
+    handleConfig (t, c) = do
+      st <- mxGetLocal
+      liftMX $ Log.info logChannel $ serviceName ++ ".configure: " ++ show st
+      configureAgent t st >> liftMX (sendChan c ()) >> mxReady
 
     configureAgent curTi st
       | HBAgentBoot <- st = do
@@ -239,23 +244,23 @@ startHeartbeatService ti = do
 data HBServer = HBServer { home     :: NodeId
                          , delay    :: TimeInterval
                          , peers    :: HashSet NodeId
-                         , tracked  :: HashMap NodeId Int
-                         , timerRef :: TimerRef
-                         }
+                           -- folks we know about
+                         , tracked  :: Map NodeId Int
+                           -- folks we've not heard from, and how many timeouts
+                           -- since we last heard from them
+                         } deriving (Show)
 
 serverName :: String
 serverName = "service.monitoring.heartbeat.server"
 
 startHeartbeatServer :: TimeInterval -> [NodeId] -> Process ()
 startHeartbeatServer ti elems = do
+  Log.info logChannel $ serverName ++ ".configure { timeInterval= " ++ show ti ++
+                                      ", initialPeerSet= " ++ show elems ++ " }"
   (us, here) <- self
   register serverName us
-  tm <- startTimeoutManager ti us
-  serve $ HBServer here ti (Set.fromList elems) Map.empty tm
-
-startTimeoutManager :: TimeInterval -> ProcessId -> Process TimerRef
-startTimeoutManager ti pid =
-  periodically ti (Unsafe.send pid ())
+  serve $ HBServer here ti (Set.fromList elems)
+                           (Map.fromList [(e, 0) | e <- elems])
 
 -- new connections are relevant, as are disconnections
   -- disconnect == , so don't track them any more
@@ -274,16 +279,22 @@ serve hbs@HBServer{..} =
           (asTimeout delay)
           [ match (\(MxConnected _ ep) ->
               return hbs { peers = Set.insert (NodeId ep) peers
-                         , tracked = Map.insert (NodeId ep) 1 tracked
+                         , tracked = Map.insert (NodeId ep) 0 tracked
                          })
             -- we can see the death of a peer in two ways
           , match (\(MxDisconnected _ ep) -> cleanup hbs (NodeId ep))
-          , match (\(MxNodeDied nid _) -> cleanup hbs nid)
+          , match (\(MxNodeDied nid why) ->
+              -- we leave the dead node in our list of peers for now, since
+              -- we'll try to contact them 4 * timeout before giving up
+              if why == DiedDisconnect
+                then return hbs { tracked = Map.adjust (+1) nid tracked }
+                else cleanup hbs nid
+              )
           , match (\(MxSent origin _ _) ->
               -- TODO: enforce the state invariant that we /cannot/ see
               -- MxSent here if the origin node isn't in peers already
               return hbs { tracked = Map.delete (processNodeId origin) tracked })
-          , match (\(_ :: TimeInterval) -> die "foo") -- return $ (timeOut ^= ti) hbs)
+--          , match (\(_ :: TimeInterval) -> die "foo") -- return $ (timeOut ^= ti) hbs)
           ]
 
   where
@@ -297,18 +308,41 @@ serve hbs@HBServer{..} =
     maybeHeartbeat _ (Just s') = serve s'
 
     tick :: HBServer -> Process HBServer
-    tick s@HBServer{ tracked = trPids } = do
-      tr <- mapM (checkTick s) $ Map.toList trPids
-      return $ s { tracked = Map.fromList tr }
+    tick s@HBServer{ peers = ps, tracked = ts } = do
+      -- let trPrs   = Set.fromList (Map.keys ts)
+      --    diffPrs = [(p, 1) | p <- Set.toList $ Set.difference ps trPrs]
+      --    ts'     = Map.union ts (Map.fromList diffPrs) in do
+      Log.debug logChannel $ serverName ++ ".tick: " ++ show ts
+        -- tr <- mapM (checkTick s) $ ts'
 
-    checkTick HBServer{ home = h, delay = d } st@(there, count)
-      | count == 4 = alarm there d >> sendTick h there >> return st
-      | otherwise  = sendTick h there >> return (there, count + 1)
+        -- our invariant is that no tracked node-id should be missing from
+        -- the set of peers, and if a peer is not being tracked, we don't
+        -- communicate with it this time around, but we do
+      foldM checkTick s ps
+
+
+    checkTick :: HBServer -> NodeId -> Process HBServer
+    checkTick hs@HBServer{ home = h
+                         , delay = d
+                         , peers = p
+                         , tracked = t } n =
+      let (old, new)    = Map.updateLookupWithKey bumpCount n t in
+      case old of
+        (Just 4) -> do alarm n d
+                       sendTick h n
+                       return $ hs{ peers = Set.delete n p, tracked = new }
+        _        -> do sendTick h n
+                       return $ hs{ tracked = new }
+
+    bumpCount _ count
+      | count == 4 = Nothing
+      | otherwise  = Just (count + 1)
 
     alarm n t = nsend serviceName (NodeUnresponsive n t)
 
     sendTick here nid = do
       us <- getSelfPid
       this <- processNode <$> ask
+      Log.debug logChannel $ serverName ++ ".tick: " ++ show nid
       sendTo (nid, serviceName) here
       liftIO $ disconnect this (ProcessIdentifier us) (NodeIdentifier nid)

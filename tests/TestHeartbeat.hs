@@ -17,6 +17,7 @@ import Control.Distributed.Process.Debug
   , systemLoggerTracer
   , startTraceRelay
   )
+import Control.Distributed.Process.Extras.SystemLog
 import Control.Distributed.Process.Extras.Time
 import Control.Exception  (IOException)
 import qualified Control.Exception as Ex (try)
@@ -45,15 +46,22 @@ testMonitorNodeDeath transport internals result = do
 
     n1 <- getSelfNode
 
-    node2 <- liftIO $ newLocalNode transport initRemoteTable
+    node2 <- liftIO $ do
+      n <- newLocalNode transport initRemoteTable
+      forkProcess n (startHeartbeatService (seconds 5) >> return ())
+      return n
+
     let n2 = localNodeId node2
 
     -- let's have some tracing to help diagnose problems
-    enableTrace =<< spawnLocal systemLoggerTracer
-    _ <- startTraceRelay n2
-    liftIO $ threadDelay 1000
 
-    traceLog "node2 running"
+    systemLog (const say) (return ()) Debug return
+
+    -- enableTrace =<< spawnLocal systemLoggerTracer
+    -- _ <- startTraceRelay n2
+    -- liftIO $ threadDelay 1000
+
+    info logChannel "node2 running"
 
     -- sending to (nodeId, "ignored") is a short cut to force a connection
     _ <- liftIO $ tryForkProcess node2 $ ensureNodeRunning (n1, "ignored")
@@ -82,7 +90,7 @@ testMonitorNodeDeath transport internals result = do
 
     traceLog "starting local heartbeat process"
 
-    _ <- startHeartbeatService $ seconds 2
+    _ <- startHeartbeatService $ seconds 5
 
     traceLog "waiting for NodeUp (due to heartbeats)"
 
