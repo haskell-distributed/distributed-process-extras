@@ -142,7 +142,7 @@ test-suite HeartbeatTests
                    ghc-prim
   hs-source-dirs:
                    tests
-  ghc-options:     -Wall -rtsopts
+  ghc-options:     -Wall -threaded -rtsopts -with-rtsopts=-N -fno-warn-unused-do-bind
   extensions:      CPP
   main-is:         TestHeartbeat.hs
 

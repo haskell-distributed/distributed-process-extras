@@ -1,10 +1,11 @@
 {-# LANGUAGE ScopedTypeVariables   #-}
 module Main where
 
+import Control.Concurrent (newEmptyMVar, putMVar, takeMVar)
 import Control.Concurrent (threadDelay)
 import Control.Distributed.Process.SysTest.Utils
 import Control.Distributed.Process hiding (NodeId)
-import Control.Distributed.Process.Internal.Types (NodeId(..), LocalNode(..))
+import Control.Distributed.Process.Internal.Types (NodeId(..), forever', LocalNode(..))
 import Control.Distributed.Process.Node
 import Control.Distributed.Process.Serializable()
 import Control.Distributed.Process.Extras hiding (__remoteTable, monitor, send)
@@ -44,22 +45,32 @@ testMonitorNodeDeath :: NT.Transport
 testMonitorNodeDeath transport internals result = do
     void $ nodeMonitor >> monitorNodes   -- start node monitoring
 
+    xLog <- liftIO $ newLocalNode transport initRemoteTable
+    liftIO $ runProcess xLog $ whereis "logger" >>= say . show
+    let logN = localNodeId xLog
     n1 <- getSelfNode
 
     node2 <- liftIO $ do
       n <- newLocalNode transport initRemoteTable
-      forkProcess n (startHeartbeatService (seconds 5) >> return ())
+      forkProcess n $ do
+        void $ nodeMonitor
+        void $ systemLog (const $ nsendRemote logN "logger") (return ()) Debug return
+        void $ startHeartbeatService (seconds 2)
+        -- liftIO $ putMVar mv p
+      -- p' <- takeMVar mv
       return n
 
     let n2 = localNodeId node2
 
     -- let's have some tracing to help diagnose problems
 
-    systemLog (const say) (return ()) Debug return
+    systemLog (const $ nsendRemote logN "logger") (return ()) Debug return
 
     -- enableTrace =<< spawnLocal systemLoggerTracer
     -- _ <- startTraceRelay n2
     -- liftIO $ threadDelay 1000
+
+    -- send pid ()
 
     info logChannel "node2 running"
 
