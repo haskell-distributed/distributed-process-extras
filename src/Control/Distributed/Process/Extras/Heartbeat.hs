@@ -260,7 +260,7 @@ startHeartbeatServer ti elems = do
   (us, here) <- self
   register serverName us
   serve $ HBServer here ti (Set.fromList elems)
-                           (Map.fromList [(e, 0) | e <- elems])
+                           (Map.fromList [(e, 1) | e <- elems])
 
 -- new connections are relevant, as are disconnections
   -- disconnect == , so don't track them any more
@@ -279,7 +279,7 @@ serve hbs@HBServer{..} =
           (asTimeout delay)
           [ match (\(MxConnected _ ep) ->
               return hbs { peers = Set.insert (NodeId ep) peers
-                         , tracked = Map.insert (NodeId ep) 0 tracked
+                         , tracked = Map.insert (NodeId ep) 1 tracked
                          })
             -- we can see the death of a peer in two ways
           , match (\(MxDisconnected _ ep) -> cleanup hbs (NodeId ep))
@@ -326,17 +326,19 @@ serve hbs@HBServer{..} =
                          , delay = d
                          , peers = p
                          , tracked = t } n =
-      let (old, new)    = Map.updateLookupWithKey bumpCount n t in
+      let (old, new) = Map.updateLookupWithKey bumpCount n t
+          hs'        = hs { tracked = new } in
+      do
+      Log.debug logChannel $ serverName ++ ".ticking: " ++ show (old, new)
       case old of
-        (Just 4) -> do alarm n d
+        (Just _) -> sendTick h n >> return hs'
+        Nothing  -> do alarm n d
                        sendTick h n
-                       return $ hs{ peers = Set.delete n p, tracked = new }
-        _        -> do sendTick h n
-                       return $ hs{ tracked = new }
+                       return hs' { peers = Set.delete n p }
 
-    bumpCount _ count
-      | count == 4 = Nothing
-      | otherwise  = Just (count + 1)
+    bumpCount _ lastCount
+      | lastCount == 3 = Nothing
+      | otherwise      = Just (lastCount + 1)
 
     alarm n t = nsend serviceName (NodeUnresponsive n t)
 
