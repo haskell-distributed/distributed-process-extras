@@ -31,7 +31,7 @@ flag old-locale
 
 library
   build-depends:   base >= 4.8 && < 5,
-                   distributed-process >= 0.6.6 && < 0.7,
+                   distributed-process >= 0.6.6 && < 0.8,
                    binary >= 0.6.3.0 && < 0.9,
                    deepseq >= 1.3.0.1 && < 1.6,
                    mtl >= 2.0 && < 2.4,
